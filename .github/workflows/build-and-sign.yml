@@ -94,7 +94,8 @@ jobs:
           echo "将包名改为：$NEW_PACKAGE_NAME"
           sed -i "s/package=\"[^\"]*\"/package=\"$NEW_PACKAGE_NAME\"/g" decompiled_apk/AndroidManifest.xml
 
-          apktool b decompiled_apk -o unsigned-modified.apk
+          # 只反编译资源 + AndroidManifest，不碰 classes*.dex
+          apktool d -s original.apk -o decompiled_apk
 
       # --------------------------------------------------
       # 签名
