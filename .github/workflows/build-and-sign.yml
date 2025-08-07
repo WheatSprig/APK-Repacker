@@ -1,0 +1,124 @@
+name: Build and Sign APK
+
+on:
+  # 1) 推送任何 Tag 时自动触发
+  push:
+    tags:
+      - '*'
+  # 2) 手动触发（workflow_dispatch）
+  workflow_dispatch:
+    inputs:
+      apk_file:
+        description: 'APK 文件名（需已存在于仓库根目录）'
+        required: true
+        type: string
+      new_package_name:
+        description: '新的包名'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # --------------------------------------------------
+      # 基础环境
+      # --------------------------------------------------
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 11
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # --------------------------------------------------
+      # 安装 Apktool
+      # --------------------------------------------------
+      - name: Install Apktool
+        run: |
+          # 安装脚本
+          sudo wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
+          sudo chmod +x /usr/local/bin/apktool
+
+          # 安装 jar（使用 GitHub release，保证可用）
+          sudo wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
+
+          # 验证
+          echo "Apktool Version:"
+          apktool --version
+
+      # --------------------------------------------------
+      # 准备 APK
+      # --------------------------------------------------
+      - name: Prepare APK
+        id: prepare
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # 手动触发：使用上传的文件
+            APK_FILE="${{ github.event.inputs.apk_file }}"
+            if [[ ! -f "$APK_FILE" ]]; then
+              echo "::error::未在仓库根目录找到 APK 文件：$APK_FILE"
+              exit 1
+            fi
+            cp "$APK_FILE" original.apk
+          else
+            # Tag 触发：假设仓库已存在 app/build/outputs/apk/release/app-release.apk
+            # 没有就报错
+            APK_PATH="app/build/outputs/apk/release/app-release.apk"
+            if [[ ! -f "$APK_PATH" ]]; then
+              echo "::error::未找到 $APK_PATH，请确认项目已正确构建并包含该文件"
+              exit 1
+            fi
+            cp "$APK_PATH" original.apk
+          fi
+          echo "APK 已复制为 original.apk"
+
+      # --------------------------------------------------
+      # 反编译 → 修改包名 → 重打包
+      # --------------------------------------------------
+      - name: Decompile, Change Package Name & Rebuild
+        run: |
+          apktool d original.apk -o decompiled_apk
+
+          NEW_PACKAGE_NAME="${{ github.event.inputs.new_package_name || env.FALLBACK_PACKAGE_NAME }}"
+          if [[ -z "$NEW_PACKAGE_NAME" ]]; then
+            echo "::error::未提供新包名"
+            exit 1
+          fi
+
+          echo "将包名改为：$NEW_PACKAGE_NAME"
+          sed -i "s/package=\"[^\"]*\"/package=\"$NEW_PACKAGE_NAME\"/g" decompiled_apk/AndroidManifest.xml
+
+          apktool b decompiled_apk -o unsigned-modified.apk
+
+      # --------------------------------------------------
+      # 签名
+      # --------------------------------------------------
+      - name: Sign APK
+        run: |
+          echo "${{ secrets.SIGNING_KEY_BASE64 }}" | base64 --decode > my-release-key.keystore
+
+          $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
+            --ks my-release-key.keystore \
+            --ks-key-alias    "${{ secrets.KEY_ALIAS }}" \
+            --ks-pass         pass:"${{ secrets.KEY_STORE_PASSWORD }}" \
+            --key-pass        pass:"${{ secrets.KEY_PASSWORD }}" \
+            --out             signed-modified.apk \
+            unsigned-modified.apk
+
+      # --------------------------------------------------
+      # 发布 Release
+      # --------------------------------------------------
+      - name: Create Release & Upload Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          files: signed-modified.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
